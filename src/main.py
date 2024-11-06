@@ -87,9 +87,39 @@ def create_menu_image(menu_text):
 
     today = datetime.now().strftime('%Y%m%d')
     image_path = f'{IG_IMAGE_PATH}/{today}.jpg'
+    os.makedirs(os.path.dirname(image_path), exist_ok=True)
     image.save(image_path)
     print(f"Menu image created: {image_path}")
     return image_path
+
+def create_initiated_image():
+    image_width = 1080
+    image_height = 1920
+    background_color = (255, 255, 255)
+    text_color = (0, 0, 0)
+    font_size = 60
+
+    image = Image.new('RGB', (image_width, image_height), background_color)
+    draw = ImageDraw.Draw(image)
+    
+    try:
+        font = ImageFont.truetype("font.ttf", font_size)
+    except:
+        font = ImageFont.load_default()
+
+    initiated_text = 'initiated'
+    text_bbox = draw.textbbox((0, 0), initiated_text, font=font)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    x = (image_width - text_width) / 2
+    y = (image_height - text_height) / 2
+
+    draw.text((x, y), initiated_text, fill=text_color, font=font)
+
+    initiated_image_path = f'{IG_IMAGE_PATH}/initiated.jpg'
+    os.makedirs(os.path.dirname(initiated_image_path), exist_ok=True)
+    image.save(initiated_image_path)
+    return initiated_image_path
 
 def upload_story(bot, image_path):
     if image_path is not None:
@@ -108,6 +138,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upload Instagram story")
     parser.add_argument("--uploadnow", action="store_true", help="Upload the story immediately")
     args = parser.parse_args()
+
+    # 프로그램 시작 시 initiated 이미지 생성 및 업로드
+    bot = Bot()
+    initiated_image_path = create_initiated_image()
+    bot.upload_story(initiated_image_path)
+    print("Initiated image uploaded successfully.")
 
     if args.uploadnow:
         fetch_and_upload_menu()
