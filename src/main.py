@@ -3,6 +3,7 @@ import requests
 import argparse
 import schedule
 import time
+import re
 
 from datetime import datetime
 from instagrapi import Client
@@ -31,39 +32,49 @@ class Bot:
 
 def fetch_and_upload_menu():
     bot = Bot()
-    menu_text = get_meal_menu()
+    
+    # 중식 메뉴 처리
+    lunch_menu = get_meal_menu(2)
+    if lunch_menu is not None:
+        lunch_image_path = create_menu_image(lunch_menu, "중식", "_lunch")
+        upload_story(bot, lunch_image_path)
+    
+    # 10초 대기
+    time.sleep(10)
+    
+    # 석식 메뉴 처리
+    dinner_menu = get_meal_menu(3)
+    if dinner_menu is not None:
+        dinner_image_path = create_menu_image(dinner_menu, "석식", "_dinner")
+        upload_story(bot, dinner_image_path)
 
-    if menu_text is not None:
-        image_path = create_menu_image(menu_text)
-        upload_story(bot, image_path)
-
-def get_meal_menu():
+def get_meal_menu(meal_code):
     today = datetime.now().strftime('%Y%m%d')
-    url = f'https://open.neis.go.kr/hub/mealServiceDietInfo?Type=json&pSize=100&ATPT_OFCDC_SC_CODE=B10&SD_SCHUL_CODE=7010208&MMEAL_SC_CODE=2&MLSV_YMD={today}'
+    url = f'https://open.neis.go.kr/hub/mealServiceDietInfo?Type=json&pSize=100&ATPT_OFCDC_SC_CODE=B10&SD_SCHUL_CODE=7010208&MMEAL_SC_CODE={meal_code}&MLSV_YMD={today}'
     
     try:
-        print("Fetching meal menu...")
+        print(f"Fetching {'lunch' if meal_code == 2 else 'dinner'} menu...")
         response = requests.get(url)
         response.raise_for_status()
 
         data = response.json()
 
         if 'mealServiceDietInfo' in data:
-            menu = data['mealServiceDietInfo'][1]['row'][0]['DDISH_NM'].replace('<br/>', '\n').replace('y', '')
-            print("Meal menu fetched successfully.")
+            menu_items = data['mealServiceDietInfo'][1]['row'][0]['DDISH_NM'].split('<br/>')
+            # 괄호와 그 안의 내용 제거
+            cleaned_menu = [re.sub(r'\s*\([^)]*\)', '', item.replace('y', '').strip()) for item in menu_items]
+            menu = '\n'.join(cleaned_menu)
+            print(f"{'Lunch' if meal_code == 2 else 'Dinner'} menu fetched successfully.")
         else:
             menu = None
-            print("Meal menu not found.")
-    except requests.exceptions.RequestException as e:
-        menu = None
-        print(f"Error fetching meal menu: {e}")
+            print(f"{'Lunch' if meal_code == 2 else 'Dinner'} menu not found.")
     except Exception as e:
         menu = None
         print(f"Error fetching meal menu: {e}")
 
     return menu
 
-def create_menu_image(menu_text):
+def create_menu_image(menu_text, meal_type, suffix):
     if menu_text is None:
         return None
 
@@ -75,18 +86,21 @@ def create_menu_image(menu_text):
 
     image = Image.new('RGB', (image_width, image_height), background_color)
     draw = ImageDraw.Draw(image)
-    font = ImageFont.truetype("font.ttf", font_size)  # Change to the path of your font file.
+    font = ImageFont.truetype("font.ttf", font_size)
 
-    text_bbox = draw.textbbox((0, 0), menu_text, font=font)
+    # 메뉴 타입과 메뉴 내용을 합침
+    full_text = f"{meal_type}\n\n{menu_text}"
+    
+    text_bbox = draw.textbbox((0, 0), full_text, font=font)
     text_width = text_bbox[2] - text_bbox[0]
     text_height = text_bbox[3] - text_bbox[1]
     x = (image_width - text_width) / 2
     y = (image_height - text_height) / 2
 
-    draw.text((x, y), menu_text, fill=text_color, font=font)
+    draw.text((x, y), full_text, fill=text_color, font=font)
 
     today = datetime.now().strftime('%Y%m%d')
-    image_path = f'{IG_IMAGE_PATH}/{today}.jpg'
+    image_path = f'{IG_IMAGE_PATH}/{today}{suffix}.jpg'
     os.makedirs(os.path.dirname(image_path), exist_ok=True)
     image.save(image_path)
     print(f"Menu image created: {image_path}")
@@ -139,11 +153,10 @@ if __name__ == "__main__":
     parser.add_argument("--uploadnow", action="store_true", help="Upload the story immediately")
     args = parser.parse_args()
 
-    # 프로그램 시작 시 initiated 이미지 생성 및 업로드
     bot = Bot()
-    initiated_image_path = create_initiated_image()
-    bot.upload_story(initiated_image_path)
-    print("Initiated image uploaded successfully.")
+    #initiated_image_path = create_initiated_image()
+    #bot.upload_story(initiated_image_path)
+    #print("Initiated image uploaded successfully.")
 
     if args.uploadnow:
         fetch_and_upload_menu()
