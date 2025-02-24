@@ -74,7 +74,8 @@ def get_weather_data():
         am_temps, pm_temps = [], []
         precip_times = []
         precip_sum = 0.0
-        
+        precip_types = set()  # 강수 형태를 저장할 집합
+
         for time_str in sorted(forecasts.keys()):
             data = forecasts[time_str]
             hour = int(time_str[:2])
@@ -87,16 +88,21 @@ def get_weather_data():
                     else: pm_temps.append(temp)
                 except: pass
 
-            # 강수
-            precip = False
-            if data.get('PTY','0') != '0':
-                precip = True
-            if data.get('RN1','강수없음') not in ['0','강수없음']:
-                precip = True
-                try: precip_sum += float(data['RN1'])
-                except: pass
+            # 강수 형태 확인
+            pty = data.get('PTY', '0')
+            if pty != '0':
+                precip_types.add(pty)  # 강수 형태 추가
 
-            if precip:
+            # 강수량 확인
+            rn1 = data.get('RN1', '0')
+            if rn1 not in ['0', '강수없음']:
+                try:
+                    precip_sum += float(rn1)
+                except:
+                    pass
+
+            # 강수 시간대 추가
+            if pty != '0' or rn1 not in ['0', '강수없음']:
                 precip_times.append(f"{time_str[:2]}:{time_str[2:]}")
 
         # 강수 시간대 그룹화
@@ -105,18 +111,34 @@ def get_weather_data():
             sorted_times = sorted(precip_times)
             current_start = current_end = sorted_times[0]
             for t in sorted_times[1:]:
-                if int(t.replace(':','')) - int(current_end.replace(':','')) == 100:
+                if int(t.replace(':', '')) - int(current_end.replace(':', '')) == 100:
                     current_end = t
                 else:
-                    time_ranges.append(f"{current_start}~{current_end}")
+                    if current_start == current_end:
+                        time_ranges.append(current_start)  # 단일 시간대
+                    else:
+                        time_ranges.append(f"{current_start}~{current_end}")  # 연속 시간대
                     current_start = current_end = t
-            time_ranges.append(f"{current_start}~{current_end}")
+            if current_start == current_end:
+                time_ranges.append(current_start)  # 마지막 단일 시간대
+            else:
+                time_ranges.append(f"{current_start}~{current_end}")  # 마지막 연속 시간대
+
+        # 강수 형태 매핑
+        precip_type_map = {
+            '0': '없음',
+            '1': '비',
+            '2': '비/눈',
+            '3': '눈',
+            '4': '소나기'
+        }
+        precip_type_str = ', '.join([precip_type_map[pty] for pty in sorted(precip_types)]) if precip_types else '없음'
 
         return {
             'date': now.strftime("%m월 %d일"),
             'am_temp': sum(am_temps)/len(am_temps) if am_temps else None,
             'pm_temp': sum(pm_temps)/len(pm_temps) if pm_temps else None,
-            'precip': 'O' if precip_times else 'X',
+            'precip': precip_type_str if precip_types else 'X',  # 강수 형태 또는 X
             'precip_times': time_ranges,
             'precip_sum': precip_sum
         }
