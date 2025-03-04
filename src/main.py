@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from instagrapi import Client
 from PIL import Image, ImageDraw, ImageFont
 from dotenv import load_dotenv
+from collections import Counter
 
 # 환경 변수 로드
 load_dotenv()
@@ -48,11 +49,41 @@ def get_weather_data():
         base_date = base_time_dt.strftime("%Y%m%d")
         base_time = base_time_dt.strftime("%H%M")
 
+        # API 요청 URL (시간 형식은 항상 4자리 문자열이어야 함 - 예: "0630")
         url = f'http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtFcst?serviceKey={WEATHER_API_KEY}&pageNo=1&numOfRows=1000&dataType=JSON&base_date={base_date}&base_time=0630&nx={NX}&ny={NY}'
+        
+        print(f"요청 URL: {url}")  # 디버깅 정보
         
         response = requests.get(url)
         response.raise_for_status()
-        data = response.json()
+        
+        # 응답 내용 확인 (디버깅용)
+        print(f"응답 상태 코드: {response.status_code}")
+        print(f"응답 헤더: {response.headers['Content-Type']}")
+        
+        try:
+            data = response.json()
+        except Exception as e:
+            print(f"JSON 변환 오류: {e}")
+            print(f"응답 내용: {response.text[:200]}...")  # 앞부분만 출력
+            raise
+        
+        # 응답 구조 확인
+        if 'response' not in data:
+            print(f"예상치 못한 응답 형식: {data.keys()}")
+            raise ValueError("API 응답에 'response' 키가 없습니다")
+            
+        if 'body' not in data['response']:
+            print(f"예상치 못한 응답 형식: {data['response'].keys()}")
+            raise ValueError("API 응답에 'body' 키가 없습니다")
+            
+        if 'items' not in data['response']['body']:
+            print(f"예상치 못한 응답 형식: {data['response']['body'].keys()}")
+            raise ValueError("API 응답에 'items' 키가 없습니다")
+        
+        if 'item' not in data['response']['body']['items']:
+            print(f"예상치 못한 응답 형식: {data['response']['body']['items'].keys()}")
+            raise ValueError("API 응답에 'item' 키가 없습니다")
         
         items = data['response']['body']['items']['item']
         today = now.strftime("%Y%m%d")
@@ -71,34 +102,74 @@ def get_weather_data():
             forecasts[fcst_time][category] = value
 
         # 데이터 분석
-        am_temps, pm_temps = [], []
+        temps = []
+        humidities = []
         precip_times = []
         precip_sum = 0.0
-        precip_types = set()  # 강수 형태를 저장할 집합
+        sky_codes = []  # 하늘 상태 코드 저장
+        precip_types_list = []  # 강수 형태 저장
 
         for time_str in sorted(forecasts.keys()):
             data = forecasts[time_str]
-            hour = int(time_str[:2])
             
             # 온도
             if 'T1H' in data:
                 try:
                     temp = float(data['T1H'])
-                    if hour < 12: am_temps.append(temp)
-                    else: pm_temps.append(temp)
-                except: pass
+                    temps.append(temp)
+                except: 
+                    pass
+
+            # 습도
+            if 'REH' in data:
+                try:
+                    humidity = float(data['REH'])
+                    humidities.append(humidity)
+                except:
+                    pass
+
+            # 하늘 상태
+            if 'SKY' in data:
+                try:
+                    sky_codes.append(data['SKY'])
+                except:
+                    pass
 
             # 강수 형태 확인
             pty = data.get('PTY', '0')
             if pty != '0':
-                precip_types.add(pty)  # 강수 형태 추가
+                # 강수형태(PTY) 코드 매핑
+                precip_type_map = {
+                    '0': '없음',
+                    '1': '비',
+                    '2': '비/눈',
+                    '3': '눈',
+                    '4': '소나기',
+                    '5': '빗방울',
+                    '6': '빗방울눈날림',
+                    '7': '눈날림'
+                }
+                precip_type = precip_type_map.get(pty, f'알 수 없음({pty})')
+                precip_types_list.append(precip_type)
 
             # 강수량 확인
             rn1 = data.get('RN1', '0')
             if rn1 not in ['0', '강수없음']:
                 try:
-                    precip_sum += float(rn1)
-                except:
+                    # 강수량 문자열 파싱
+                    if rn1 == '1mm 미만':
+                        precip_sum += 0.5  # 1mm 미만은 0.5로 가정
+                    elif 'mm' in rn1:
+                        # 숫자 부분만 추출 (예: "2.0mm" -> 2.0)
+                        precip_value = float(re.search(r'(\d+\.?\d*)', rn1).group(1))
+                        precip_sum += precip_value
+                    else:
+                        try:
+                            precip_sum += float(rn1)
+                        except:
+                            pass
+                except Exception as e:
+                    print(f"강수량 파싱 오류: {e} - 값: {rn1}")
                     pass
 
             # 강수 시간대 추가
@@ -124,66 +195,143 @@ def get_weather_data():
             else:
                 time_ranges.append(f"{current_start}~{current_end}")  # 마지막 연속 시간대
 
-        # 강수 형태 매핑
-        precip_type_map = {
-            '0': '없음',
-            '1': '비',
-            '2': '비/눈',
-            '3': '눈',
-            '4': '소나기'
-        }
-        precip_type_str = ', '.join([precip_type_map[pty] for pty in sorted(precip_types)]) if precip_types else '없음'
+        # 하늘 상태 결정 (가장 많이 나온 코드)
+        sky_condition = "정보 없음"
+        if sky_codes:
+            # 하늘상태(SKY) 코드 : 맑음(1), 구름많음(3), 흐림(4)
+            sky_map = {'1': '맑음', '3': '구름많음', '4': '흐림'}
+            sky_counter = Counter(sky_codes)
+            most_common_sky_code = sky_counter.most_common(1)[0][0]
+            sky_condition = sky_map.get(most_common_sky_code, '알 수 없음')
+
+        # 가장 많이 나온 강수 형태 결정
+        precip_type = ""
+        if precip_types_list:
+            precip_counter = Counter(precip_types_list)
+            most_common_precip = precip_counter.most_common(1)[0][0]
+            precip_type = f", {most_common_precip}"
+
+        # 최종 날씨 상태
+        weather_status = f"{sky_condition}{precip_type}"
 
         return {
             'date': now.strftime("%m월 %d일"),
-            'am_temp': sum(am_temps)/len(am_temps) if am_temps else None,
-            'pm_temp': sum(pm_temps)/len(pm_temps) if pm_temps else None,
-            'precip': precip_type_str if precip_types else 'X',  # 강수 형태 또는 X
+            'avg_temp': sum(temps)/len(temps) if temps else None,
+            'avg_humidity': sum(humidities)/len(humidities) if humidities else None,
+            'weather_status': weather_status,
             'precip_times': time_ranges,
             'precip_sum': precip_sum
         }
 
     except Exception as e:
+        import traceback
         print(f"Weather error: {e}")
+        print(traceback.format_exc())
         return None
 
-def create_weather_image(weather):
+def create_weather_image(weather, output_path=None):
     img = Image.new('RGB', (1080, 1920), (255, 255, 255))
     draw = ImageDraw.Draw(img)
     
     try:
-        font = ImageFont.truetype("font.ttf", 60)
-        small_font = ImageFont.truetype("font.ttf", 40)
+        # 폰트 로드
+        title_font = ImageFont.truetype("font.ttf", 60)
+        label_font = ImageFont.truetype("font.ttf", 50)
+        value_font = ImageFont.truetype("font.ttf", 48)
+        source_font = ImageFont.truetype("font.ttf", 38)
     except:
-        font = ImageFont.load_default()
-        small_font = ImageFont.load_default()
+        title_font = ImageFont.load_default()
+        label_font = ImageFont.load_default()
+        value_font = ImageFont.load_default()
+        source_font = ImageFont.load_default()
 
     # 제목
     title = f"{weather['date']} 날씨"
-    w, h = draw.textbbox((0,0), title, font=font)[2:]
-    draw.text(((1080-w)/2, 400), title, (0,0,0), font=font)
+    title_bbox = draw.textbbox((0,0), title, font=title_font)
+    title_width = title_bbox[2] - title_bbox[0]
+    draw.text(((1080-title_width)/2, 350), title, (0,0,0), font=title_font)
 
     # 출처
     source = "출처: 기상청 초단기예보"
-    w, h = draw.textbbox((0,0), source, font=small_font)[2:]
-    draw.text(((1080-w)/2, 500), source, (100,100,100), font=small_font)
+    source_bbox = draw.textbbox((0,0), source, font=source_font)
+    source_width = source_bbox[2] - source_bbox[0]
+    draw.text(((1080-source_width)/2, 430), source, (100,100,100), font=source_font)
 
-    # 내용
-    y = 700
-    lines = [
-        f"오전 평균 온도: {weather['am_temp']:.1f}℃" if weather['am_temp'] else "오전 온도: 정보없음",
-        f"오후 평균 온도: {weather['pm_temp']:.1f}℃" if weather['pm_temp'] else "오후 온도: 정보없음",
-        f"강수 여부: {weather['precip']}",
-        "강수 시간대: " + (", ".join(weather['precip_times']) if weather['precip_times'] else "없음"),
-        f"강수량: {weather['precip_sum']:.1f}mm"
+    # 날씨 정보 항목
+    items = [
+        {"label": "하늘 상태", "value": weather['weather_status']},
+        {"label": "평균 온도", "value": f"{weather['avg_temp']:.1f}℃" if weather['avg_temp'] else "정보없음"},
+        {"label": "평균 습도", "value": f"{weather['avg_humidity']:.1f}%" if weather['avg_humidity'] else "정보없음"},
+        {"label": "강수 시간대", "value": ", ".join(weather['precip_times']) if weather['precip_times'] else "X"},
+        {"label": "강수량", "value": f"{weather['precip_sum']:.1f}mm" if weather['precip_sum'] > 0 else "X"}
     ]
-
-    for line in lines:
-        w, h = draw.textbbox((0,0), line, font=font)[2:]
-        draw.text(((1080-w)/2, y), line, (0,0,0), font=font)
-        y += h + 50
-
-    path = f"{IG_IMAGE_PATH}/{datetime.now().strftime('%Y%m%d')}_weather.jpg"
+    
+    # 시작 위치 설정
+    current_y = 700
+    line_spacing = 100  # 줄 간격
+    center_x = 1080 // 2  # 중앙 X 좌표
+    
+    for item in items:
+        # 레이블과 값을 한 줄에 표시
+        text = f"{item['label']}: {item['value']}"
+        
+        # 줄바꿈이 필요한지 확인
+        text_bbox = draw.textbbox((0, 0), text, font=label_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        
+        if text_width > 900:  # 너무 길면 레이블과 값을 두 줄로 나눔
+            # 레이블 출력
+            label_bbox = draw.textbbox((0, 0), item['label'] + ":", font=label_font)
+            label_width = label_bbox[2] - label_bbox[0]
+            draw.text(((1080-label_width)/2, current_y), item['label'] + ":", (0, 0, 0), font=label_font)
+            
+            # 값은 다음 줄에 출력
+            current_y += 70
+            value_bbox = draw.textbbox((0, 0), item['value'], font=value_font)
+            value_width = value_bbox[2] - value_bbox[0]
+            
+            # 값이 너무 길면 잘라서 여러 줄로 출력
+            if value_width > 900:
+                words = item['value'].split()
+                lines = []
+                current_line = []
+                
+                for word in words:
+                    test_line = current_line + [word]
+                    test_text = " ".join(test_line)
+                    test_bbox = draw.textbbox((0, 0), test_text, font=value_font)
+                    test_width = test_bbox[2] - test_bbox[0]
+                    
+                    if test_width <= 900:
+                        current_line = test_line
+                    else:
+                        if current_line:
+                            lines.append(" ".join(current_line))
+                        current_line = [word]
+                
+                if current_line:
+                    lines.append(" ".join(current_line))
+                
+                # 각 줄 출력
+                for line in lines:
+                    line_bbox = draw.textbbox((0, 0), line, font=value_font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    draw.text(((1080-line_width)/2, current_y), line, (0, 0, 0), font=value_font)
+                    current_y += 60
+            else:
+                # 한 줄로 충분한 경우
+                draw.text(((1080-value_width)/2, current_y), item['value'], (0, 0, 0), font=value_font)
+                current_y += line_spacing
+        else:
+            # 한 줄로 표시 가능한 경우
+            draw.text(((1080-text_width)/2, current_y), text, (0, 0, 0), font=label_font)
+            current_y += line_spacing
+    
+    if output_path:
+        path = output_path
+    else:
+        path = f"{IG_IMAGE_PATH}/{datetime.now().strftime('%Y%m%d')}_weather.jpg"
+    
     os.makedirs(os.path.dirname(path), exist_ok=True)
     img.save(path)
     print(f"Weather image created: {path}")
@@ -273,6 +421,12 @@ def upload_story(bot, image_path):
     if image_path is not None:
         bot.upload_story(image_path)
 
+def generate_weather_image():
+    weather_data = get_weather_data()
+    if weather_data:
+        return create_weather_image(weather_data, "./weather.png")
+    return None
+
 def job():
     fetch_and_upload_menu()
 
@@ -285,14 +439,12 @@ schedule.every().friday.at("07:00").do(job)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Upload Instagram story")
     parser.add_argument("--uploadnow", action="store_true", help="Upload the story immediately")
+    parser.add_argument("--genweather", action="store_true", help="Generate weather image only")
     args = parser.parse_args()
 
-    bot = Bot()
-    #initiated_image_path = create_initiated_image()
-    #bot.upload_story(initiated_image_path)
-    #print("Initiated image uploaded successfully.")
-
-    if args.uploadnow:
+    if args.genweather:
+        generate_weather_image()
+    elif args.uploadnow:
         fetch_and_upload_menu()
     else:
         print("Program initiated.")
