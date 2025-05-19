@@ -1,7 +1,9 @@
 requests
 pydantic==1.10.9
-instagrapi
+instagrapi==1.19.5
 pillow
 python-dotenv
 schedule
 argparse
+beautifulsoup4
+httpx
